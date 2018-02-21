@@ -13,9 +13,9 @@ import UIKit
 extension CALayer {
     func animateToPosition(newPosition: CGPoint) {
         let animation = CABasicAnimation(keyPath: "position")
-        animation.fromValue = self.valueForKey("position")
-        animation.toValue = NSValue(CGPoint: newPosition)
+        animation.fromValue = self.value(forKey: "position")
+        animation.toValue = NSValue(cgPoint: newPosition)
         self.position = newPosition
-        self.addAnimation(animation, forKey: "position")
+        self.add(animation, forKey: "position")
     }
 }

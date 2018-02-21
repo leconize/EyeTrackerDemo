@@ -11,6 +11,6 @@ import Foundation
 /// Defines the tasks that one can implement in response to events in an
 /// `EyeCaptureSession` object.
 protocol EyeCaptureSessionDelegate {
-    func processFace(ff: FaceFrame)
+    func processFace(faceFrame: FaceFrame)
     // TODO: Add dropped frame method.
 }

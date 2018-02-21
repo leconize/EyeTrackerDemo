@@ -21,7 +21,7 @@ class FPSQueue {
         let now = NSDate()
         // Remove all times older than a second.
         while (!queue.isEmpty && queue.first!.timeIntervalSince1970 < now.timeIntervalSince1970 - 1.0) {
-            queue.removeAtIndex(0)
+            queue.remove(at: 0)
         }
         objc_sync_exit(self)
         

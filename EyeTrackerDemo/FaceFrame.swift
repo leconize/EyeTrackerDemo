@@ -40,8 +40,9 @@ class FaceFrame {
     /// the origin.
     var leftEyeCrop: UIImage? {
         if self.leftEye != nil {
-            let imageRef = CGImageCreateWithImageInRect(self.faceCrop!.CGImage, self.leftEye!)!
-            return UIImage(CGImage: imageRef)
+            let imageRef = self.faceCrop?.cgImage?.cropping(to: self.leftEye!)
+//            let imageRef = CGImageCreateWithImageInRect(self.faceCrop!.CGImage, self.leftEye!)!
+            return UIImage(cgImage: imageRef!)
         } else {
             return nil
         }
@@ -50,8 +51,8 @@ class FaceFrame {
     /// to the origin.
     var rightEyeCrop: UIImage? {
         if self.rightEye != nil {
-            let imageRef = CGImageCreateWithImageInRect(self.faceCrop!.CGImage, self.rightEye!)!  // Mirror since this is a UIImage.
-            return UIImage(CGImage: imageRef)
+            let imageRef = self.faceCrop!.cgImage?.cropping(to: self.rightEye!) // Mirror since this is a UIImage.
+            return UIImage(cgImage: imageRef!)
         } else {
             return nil
         }
@@ -62,7 +63,7 @@ class FaceFrame {
     // new properties are added.
     init() {
         time = NSDate()
-        deviceOrientation = UIDeviceOrientation.Unknown
+        deviceOrientation = UIDeviceOrientation.unknown
     }
     
     // Uses current time.
@@ -113,7 +114,7 @@ class FaceFrame {
     var uploadSizeBytes: Int {
         var sum = 0;
         if let faceImg = faceCrop {
-            sum += CGImageGetHeight(faceImg.CGImage) * CGImageGetBytesPerRow(faceImg.CGImage);
+            sum += faceImg.cgImage!.height * faceImg.cgImage!.bytesPerRow;
         }
         return sum;
     }
