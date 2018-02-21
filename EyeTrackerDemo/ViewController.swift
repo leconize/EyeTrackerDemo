@@ -37,16 +37,16 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
     var rightEyeLayer = CALayer()
     // Hide the boxes if they haven't been updated (i.e., their timer hasn't
     // been reset) recently enough.
-    var faceTimeout: NSTimer?
-    var leftEyeTimeout: NSTimer?
-    var rightEyeTimeout: NSTimer?
+    var faceTimeout: Timer?
+    var leftEyeTimeout: Timer?
+    var rightEyeTimeout: Timer?
     let timeoutLength = 0.2  // Number of seconds to leave a box on the screen after it's displayed.
     
     // Properties that will be initialized in viewDidLoad.
     var eyeCaptureSession: EyeCaptureSession!
-    var statusTimer: NSTimer!
+    var statusTimer: Timer!
 
-    var circleTimer: NSTimer?
+    var circleTimer: Timer?
     let redLayer = CALayer()
     let circleRadius = CGFloat(25)
     
@@ -55,23 +55,24 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
     
     // From: http://iosdevcenters.blogspot.com/2015/12/how-to-resize-image-in-swift-in-ios.html
     func resizeImage(image: UIImage, targetSize: CGSize) -> UIImage {
-        let rect = CGRectMake(0, 0, targetSize.width, targetSize.height)
+        
+        let rect = CGRect(x: 0, y: 0, width: targetSize.width, height: targetSize.height)
         
         // Actually do the resizing to the rect using the ImageContext stuff
         UIGraphicsBeginImageContextWithOptions(targetSize, false, 1.0)
-        image.drawInRect(rect)
+        image.draw(in: rect)
         let newImage = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
-        return newImage
+        return newImage!
     }
     
     // MARK: - EyeCaptureSessionDelegate Methods
-    func processFace(ff: FaceFrame) {
+    func processFace(faceFrame ff: FaceFrame) {
         if leftEyeView.image != nil && rightEyeView.image != nil && ff.faceCrop != nil && ff.faceRect != nil {
             let size = CGSize(width: 219, height: 219)
-            let resizedLeftEye = resizeImage(leftEyeView.image!, targetSize: size)
-            let resizedRightEye = resizeImage(rightEyeView.image!, targetSize: size)
-            let resizedFace = resizeImage(ff.faceCrop!, targetSize: size)
+            let resizedLeftEye = resizeImage(image: leftEyeView.image!, targetSize: size)
+            let resizedRightEye = resizeImage(image: rightEyeView.image!, targetSize: size)
+            let resizedFace = resizeImage(image: ff.faceCrop!, targetSize: size)
             
             let frameHeight = Double(Float(ff.fullFrameSize!.width))
             let frameWidth = Double(Float(ff.fullFrameSize!.height))
@@ -80,16 +81,16 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
             let faceGridY = Double(Float(ff.faceRect!.origin.y))
             let faceGridW = Double(Float(ff.faceRect!.size.width))
             let faceGridH = Double(Float(ff.faceRect!.size.height))
-            let faceGrid:[Float] = createFaceGrid(frameWidth, frameH: frameHeight, gridW: 25.0, gridH: 25.0, labelFaceX: faceGridX, labelFaceY: faceGridY, labelFaceW: faceGridW, labelFaceH: faceGridH)
+            let faceGrid:[Float] = createFaceGrid(frameW: frameWidth, frameH: frameHeight, gridW: 25.0, gridH: 25.0, labelFaceX: faceGridX, labelFaceY: faceGridY, labelFaceW: faceGridW, labelFaceH: faceGridH)
             
             let startTime = CFAbsoluteTimeGetCurrent()
             
-            let output = self.neuralNet.runNeuralNetwork(faceGrid, firstImage: resizedLeftEye, secondImage: resizedRightEye, thirdImage: resizedFace)
+            let output = self.neuralNet.run(faceGrid, firstImage: resizedLeftEye, secondImage: resizedRightEye, thirdImage: resizedFace)
             
             let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
             print("Run time: \(timeElapsed) s")
             
-            let orientation = UIDevice.currentDevice().orientation.rawValue
+            let orientation = UIDevice.current.orientation.rawValue
             
             let frameSizePortrait = CGSize(width: min(view.frame.size.width, view.frame.size.height), height: max(view.frame.size.width, view.frame.size.height));
 
@@ -99,7 +100,7 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
                 frameSize = CGSize(width: frameSizePortrait.height, height: frameSizePortrait.width)
             }
             
-            convertCoords(Float(output.x), yCam: Float(output.y), deviceName: "iPhone 6s", labelOrientation: orientation, labelActiveScreenW: Int(frameSize.width), labelActiveScreenH: Int(frameSize.height), useCM: false)
+            convertCoords(xCam: Float(output.x), yCam: Float(output.y), deviceName: "iPhone 6s", labelOrientation: orientation, labelActiveScreenW: Int(frameSize.width), labelActiveScreenH: Int(frameSize.height), useCM: false)
 
         }
 
@@ -135,16 +136,16 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
                 // Now, update the coordinates of the face rect, in case the
                 // frame was rotated.
                 switch ff.deviceOrientation {
-                case .Portrait:
+                case .portrait:
                     // Do nothing.
                     break
-                case .LandscapeLeft:
+                case .landscapeLeft:
                     faceRectDisp = faceRectDisp
                         .rectRotatedRight(inSourceFrame: ff.fullFrameSize!)
-                case .LandscapeRight:
+                case .landscapeRight:
                     faceRectDisp = faceRectDisp
                         .rectRotatedLeft(inSourceFrame: ff.fullFrameSize!)
-                case .PortraitUpsideDown:
+                case .portraitUpsideDown:
                     faceRectDisp = faceRectDisp
                         .rectRotated180(inSourceFrame: ff.fullFrameSize!)
                 default:
@@ -157,14 +158,16 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
                 // TODO: Move this code to EyeCaptureSession since it owns the video
                 //       preview layer.
                 let videoPreviewBox = EyeCaptureSession.videoPreviewBoxForGravity(
-                    videoPreviewLayer.videoGravity,
+                    gravity: videoPreviewLayer.videoGravity.rawValue,
                     viewSize: videoView.frame.size, imageSize: fullFrameSizePortrait)
                 let scaleFactor = videoPreviewBox.width / fullFrameSizePortrait.width  // Could do height separately, but there are bigger problems if they're not the same scale.
-                faceRectDisp = CGRectOffset(faceRectDisp, -videoPreviewBox.origin.x, -videoPreviewBox.origin.y)  // These values were positive in Apple's SquareCam demo code.
+                
+                faceRectDisp = faceRectDisp.offsetBy(dx: -videoPreviewBox.origin.x, dy: -videoPreviewBox.origin.y)
+                // These values were positive in Apple's SquareCam demo code.
                 faceRectDisp = faceRectDisp.rectScaled(byFactor: scaleFactor)
                 var leftEyeDisp, rightEyeDisp: CGRect?
                 
-                if let aLeftEye = ff.leftEye, aRightEye = ff.rightEye {
+                if let aLeftEye = ff.leftEye, let aRightEye = ff.rightEye {
                     // Mirror for display. Coordinates are already in UIKit space.
                     // TODO: Move the scaling stuff to the display method as well?
                     leftEyeDisp = aLeftEye
@@ -174,20 +177,20 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
                         .rectScaled(byFactor: scaleFactor)
                         .rectWithFlippedX(inFrame: faceRectDisp)
                     switch ff.deviceOrientation {
-                    case .Portrait:
+                    case .portrait:
                         // Do nothing.
                         break
-                    case .LandscapeLeft:
+                    case .landscapeLeft:
                         leftEyeDisp = leftEyeDisp!
                             .rectRotatedRight(inSourceFrame: faceRectDisp)
                         rightEyeDisp = leftEyeDisp!
                             .rectRotatedRight(inSourceFrame: faceRectDisp)
-                    case .LandscapeRight:
+                    case .landscapeRight:
                         leftEyeDisp = leftEyeDisp!
                             .rectRotatedLeft(inSourceFrame: faceRectDisp)
                         rightEyeDisp = rightEyeDisp!
                             .rectRotatedLeft(inSourceFrame: faceRectDisp)
-                    case .PortraitUpsideDown:
+                    case .portraitUpsideDown:
                         leftEyeDisp = leftEyeDisp!
                             .rectRotated180(inSourceFrame: faceRectDisp)
                         rightEyeDisp = rightEyeDisp!
@@ -197,11 +200,11 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
                     }
                 }
                 
-                dispatch_async(dispatch_get_main_queue()) {
-                    self.drawBoxesForFace(faceRectDisp, faceYaw: ff.faceYaw,
-                        faceRoll: ff.faceRoll, leftEye: leftEyeDisp,
-                        leftEyeClosed: ff.leftEyeClosed, rightEye: rightEyeDisp,
-                        rightEyeClosed: ff.rightEyeClosed)
+                DispatchQueue.main.async {
+                    self.drawBoxesForFace(face: faceRectDisp, faceYaw: ff.faceYaw,
+                                          faceRoll: ff.faceRoll, leftEye: leftEyeDisp,
+                                          leftEyeClosed: ff.leftEyeClosed, rightEye: rightEyeDisp,
+                                          rightEyeClosed: ff.rightEyeClosed)
                 }
             }
         }
@@ -228,12 +231,19 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
         let deviceScreenHeightMm = [121.5400, 104.0500, 121.5400, 104.0500, 90.3900, 90.3900, 90.3900, 74.8800, 161.2000, 203.1100, 198.1000, 198.1000, 198.1000, 198.1000]
     
         var index = -1
-        for (var i=0; i < deviceNames.count; i++) {
+        
+        for i in 0..<deviceNames.count {
             if deviceNames[i] == deviceName {
                 index = i
                 break
             }
         }
+//        for (var i=0; i < deviceNames.count; i++) {
+//            if deviceNames[i] == deviceName {
+//                index = i
+//                break
+//            }
+//        }
         let dx = deviceCameraToScreenXMm[index]
         let dy = deviceCameraToScreenYMm[index]
         let dw = deviceScreenWidthMm[index]
@@ -268,11 +278,11 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
             yOut = yOut / 10;
         }
         
-        let toPoint: CGPoint = CGPointMake(CGFloat(xOut), CGFloat(yOut))
+        let toPoint: CGPoint = CGPoint(x: CGFloat(xOut), y: CGFloat(yOut))
 //        self.newPosition = toPoint
         
         let kalmanFilter = KalmanFilter()
-        let smoothPoint = kalmanFilter.processPoint(toPoint)
+        let smoothPoint = kalmanFilter?.processPoint(toPoint)
         self.newPosition = smoothPoint
         
         //print("Old point is (\(toPoint.x), \(toPoint.y)), and the new point is (\(smoothPoint.x), \(smoothPoint.y))")
@@ -284,8 +294,8 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
     func createFaceGrid(frameW: Double, frameH: Double, gridW: Double, gridH: Double, labelFaceX: Double, labelFaceY: Double, labelFaceW: Double, labelFaceH: Double) -> Array<Float> {
         let scaleX = gridW / frameW
         let scaleY = gridH / frameH
-        var grid = Array(count: Int(round(gridH)), repeatedValue: Array(count: Int(round(gridW)), repeatedValue: 0.0))
-        var flattenedGrid = [Float](count: 625, repeatedValue: 0.0)
+        var grid = Array(repeating: Array(repeating: 0.0, count: Int(round(gridW))), count: Int(round(gridH)))
+        var flattenedGrid = [Float](repeating: 0.0, count: 625)
         
         // Use zero-based image coordinates.
         var xLo = Int(round(labelFaceX * scaleX))
@@ -299,12 +309,18 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
         yLo = min(Int(round(gridH) - 1), max(0, yLo))
         yHi = min(Int(round(gridH) - 1), max(0, yHi))
         
-        for var i=yLo; i < yHi + 1; i++ {
-            for var j=xLo; j < xHi+1; j++ {
+        for i in yLo..<yHi {
+            for j in xLo..<xHi {
                 flattenedGrid[25 * i + j] = 1.0
                 grid[i][j] = 1.0
             }
         }
+//        for var i=yLo; i < yHi + 1; i++ {
+//            for var j=xLo; j < xHi+1; j++ {
+//                flattenedGrid[25 * i + j] = 1.0
+//                grid[i][j] = 1.0
+//            }
+//        }
         
         return flattenedGrid
     }
@@ -320,71 +336,71 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
             // Disable animations if the face layer was hidden. This is especially
             // good at the beginning to prevent black boxes from sliding out from
             // the origin. Alternatively, opacity alone could be animated.
-            if faceLayer.hidden {
+        if faceLayer.isHidden {
                 CATransaction.setValue(kCFBooleanTrue, forKey: kCATransactionDisableActions)
             }
             
             // Display a red box if the user is not looking directly at the camera.
             // Practically this only accepts values of 0.0 since yaw is currently
             // measured in increments of 45° and roll in increments of 30°.
-            if (faceYaw < 45.0 || faceYaw > 315.0) && (faceRoll < 30.0 || faceRoll > 330.0) {
-                self.faceLayer.borderColor = UIColor.greenColor().CGColor
+        if (Double(faceYaw!) < 45.0 || Double(faceYaw!) > 315.0) && ( Double(faceRoll!) < 30.0 || Double(faceRoll!) > 330.0) {
+                self.faceLayer.borderColor = UIColor.green.cgColor
             } else {
-                self.faceLayer.borderColor = UIColor.redColor().CGColor
+                self.faceLayer.borderColor = UIColor.red.cgColor
             }
             
             if leftEyeClosed == true {  // Explicitly testing == true also checks for nil appropriately.
-                self.leftEyeLayer.borderColor = UIColor.redColor().CGColor
+                self.leftEyeLayer.borderColor = UIColor.red.cgColor
             } else {
-                self.leftEyeLayer.borderColor = UIColor.greenColor().CGColor
+                self.leftEyeLayer.borderColor = UIColor.green.cgColor
             }
             
             if rightEyeClosed == true {
-                self.rightEyeLayer.borderColor = UIColor.redColor().CGColor
+                self.rightEyeLayer.borderColor = UIColor.red.cgColor
             } else {
-                self.rightEyeLayer.borderColor = UIColor.greenColor().CGColor
+                self.rightEyeLayer.borderColor = UIColor.green.cgColor
             }
             
-            self.faceLayer.hidden = false  // In case the box was hidden before, make sure it isn't now.
+        self.faceLayer.isHidden = false  // In case the box was hidden before, make sure it isn't now.
             self.faceLayer.frame = face   // Position the box.
             // Reset the timer so that the box disappears if not updated soon enough.
             if let oldFaceTimeout = self.faceTimeout {
                 oldFaceTimeout.invalidate()
             }
-            faceTimeout = NSTimer.scheduledTimerWithTimeInterval(self.timeoutLength, target: self, selector: Selector("hideFaceBox"), userInfo: nil, repeats: false)
+        faceTimeout = Timer.scheduledTimer(timeInterval: self.timeoutLength, target: self, selector: Selector("hideFaceBox"), userInfo: nil, repeats: false)
             
             if let aLeftEye = leftEye {
-                self.leftEyeLayer.hidden = false
+                self.leftEyeLayer.isHidden = false
                 self.leftEyeLayer.frame = aLeftEye
                 if let oldLeftEyeTimeout = self.leftEyeTimeout {
                     oldLeftEyeTimeout.invalidate()
                 }
-                leftEyeTimeout = NSTimer.scheduledTimerWithTimeInterval(self.timeoutLength, target: self, selector: Selector("hideLeftEyeBox"), userInfo: nil, repeats: false)
+                leftEyeTimeout = Timer.scheduledTimer(timeInterval: self.timeoutLength, target: self, selector: Selector("hideLeftEyeBox"), userInfo: nil, repeats: false)
             }
             
             if let aRightEye = rightEye {
-                self.rightEyeLayer.hidden = false
+                self.rightEyeLayer.isHidden = false
                 self.rightEyeLayer.frame = aRightEye
                 if let oldRightEyeTimeout = self.rightEyeTimeout {
                     oldRightEyeTimeout.invalidate()
                 }
-                rightEyeTimeout = NSTimer.scheduledTimerWithTimeInterval(self.timeoutLength, target: self, selector: Selector("hideRightEyeBox"), userInfo: nil, repeats: false)
+                rightEyeTimeout = Timer.scheduledTimer(timeInterval: self.timeoutLength, target: self, selector: Selector("hideRightEyeBox"), userInfo: nil, repeats: false)
             }
             CATransaction.commit()  // Done batching the UI updates together.
     }
     
     func hideFaceBox() {
-        self.faceLayer.hidden = true
+        self.faceLayer.isHidden = true
         faceTimeout = nil
     }
     
     func hideLeftEyeBox() {
-        self.leftEyeLayer.hidden = true
+        self.leftEyeLayer.isHidden = true
         leftEyeTimeout = nil
     }
     
     func hideRightEyeBox() {
-        self.rightEyeLayer.hidden = true
+        self.rightEyeLayer.isHidden = true
         rightEyeTimeout = nil
     }
     
@@ -405,12 +421,12 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
     @IBAction func didTapVideoView(sender: AnyObject) {
         if self.eyeCaptureSession.debugView != nil {
             self.eyeCaptureSession.debugView = nil
-            self.debugView.hidden = true
+            self.debugView.isHidden = true
             setup()
             print(self.leftEyeView.image!.size.height)
         } else {
             self.eyeCaptureSession.debugView = self.debugView
-            self.debugView.hidden = false
+            self.debugView.isHidden = false
         }
     }
     
@@ -419,16 +435,16 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
     override func viewDidLoad() {
         super.viewDidLoad()
         //self.eyeCaptureSession.debugView = self.debugView
-        self.debugView.hidden = false
+        self.debugView.isHidden = false
         faceLayer.borderWidth = 5
         leftEyeLayer.borderWidth = 3
         rightEyeLayer.borderWidth = 3
-        faceLayer.hidden = true
-        leftEyeLayer.hidden = true
-        rightEyeLayer.hidden = true
+        faceLayer.isHidden = true
+        leftEyeLayer.isHidden = true
+        rightEyeLayer.isHidden = true
         videoView.layer.masksToBounds = true  // VERIFY: Should not be necessary, but prevent boxes from ever being drawn outside of the video layer.
         
-        videoView.layer.insertSublayer(faceLayer, atIndex: 0)
+        videoView.layer.insertSublayer(faceLayer, at: 0)
         // Eye boxes will be relative to the face.
         faceLayer.addSublayer(leftEyeLayer)
         faceLayer.addSublayer(rightEyeLayer)
@@ -437,17 +453,17 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
 
     }
     
-    override func viewWillAppear(animated: Bool) {
+    override func viewWillAppear(_ animated: Bool) {
         eyeCaptureSession = EyeCaptureSession(delegate: self, videoView: videoView, debugView: self.debugView, rightEyeView: self.rightEyeView, leftEyeView: self.leftEyeView)  // This will add the video layer to the very back, behind the face/eye boxes.
         
         // This default is set when declaring the variable, but we set it from
         // the segmented controller here just in case.
-        didChangeDetector(self.detectorSegmentedControl)
-        statusTimer = NSTimer.scheduledTimerWithTimeInterval(0.1, target: self, selector: Selector("updateStatus"), userInfo: nil, repeats: true)
+        didChangeDetector(sender: self.detectorSegmentedControl)
+        statusTimer = Timer.scheduledTimer(timeInterval: 0.1, target: self, selector: Selector(("updateStatus")), userInfo: nil, repeats: true)
         
     }
     
-    override func viewWillDisappear(animated: Bool) {
+    override func viewWillDisappear(_ animated: Bool) {
         eyeCaptureSession = nil
         statusTimer.invalidate()
     }
@@ -475,23 +491,23 @@ class ViewController: UIViewController, EyeCaptureSessionDelegate {
 //        let timeElapsed = CFAbsoluteTimeGetCurrent() - startTime
 //        print("Time elapsed for \(title): \(timeElapsed) s")
         redLayer.frame = CGRect(x: 100, y: 100, width: 50, height: 50)
-        redLayer.backgroundColor = UIColor.redColor().CGColor
+        redLayer.backgroundColor = UIColor.red.cgColor
         
         // Round corners
         redLayer.cornerRadius = circleRadius
         
         // Set border
-        redLayer.borderColor = UIColor.blackColor().CGColor
+        redLayer.borderColor = UIColor.black.cgColor
         redLayer.borderWidth = 10
         
-        redLayer.shadowColor = UIColor.blackColor().CGColor
+        redLayer.shadowColor = UIColor.black.cgColor
         redLayer.shadowOpacity = 0.8
-        redLayer.shadowOffset = CGSizeMake(2, 2)
+        redLayer.shadowOffset = CGSize(width: 2, height: 2)
         redLayer.shadowRadius = 3
         
         self.videoView.layer.addSublayer(redLayer)
         
-        circleTimer = NSTimer.scheduledTimerWithTimeInterval(0.01, target: self, selector: Selector("moveToPositionWithTimer"), userInfo: nil, repeats: true)
+        circleTimer = Timer.scheduledTimer(timeInterval: 0.01, target: self, selector: Selector(("moveToPositionWithTimer")), userInfo: nil, repeats: true)
     }
 
     func moveToPositionWithTimer() {

@@ -300,18 +300,22 @@
    
     NSString* networkPath = [[NSBundle mainBundle] pathForResource:@"lefteye" ofType:@"ntwk" inDirectory:directory_name];
     assert(networkPath != NULL);
-    left_eye_network = jpcnn_create_network(219, [networkPath UTF8String]);
+    jpcnn_create_network([networkPath UTF8String]);
+//    left_eye_network = jpcnn_create_network(219, [networkPath UTF8String]);
     assert(left_eye_network != NULL);
     
     networkPath = [[NSBundle mainBundle] pathForResource:@"righteye" ofType:@"ntwk" inDirectory:directory_name];
     assert(networkPath != NULL);
-    right_eye_network = jpcnn_create_network(219, [networkPath UTF8String]);
+    jpcnn_create_network([networkPath UTF8String]);
+//    right_eye_network = jpcnn_create_network(219, [networkPath UTF8String]);
     assert(right_eye_network != NULL);
     
     networkPath = [[NSBundle mainBundle] pathForResource:@"face" ofType:@"ntwk" inDirectory:directory_name];
     assert(networkPath != NULL);
-    face_network = jpcnn_create_network(219, [networkPath UTF8String]);
+    jpcnn_create_network([networkPath UTF8String]);
+//    face_network = jpcnn_create_network(219, [networkPath UTF8String]);
     assert(face_network != NULL);
+    
     
     // BEGIN: LEFTEYE
     float* LE_predictions;
@@ -383,7 +387,7 @@
     float* final_predictions;
     int final_predictionsLength;
     jpcnn_concat_final(&final_predictions, &final_predictionsLength, 320, 128, final_weights1, 1, 128, final_bias1, 128, 2, final_weights2, 1, 2, final_bias2, 1, 320, eyes_predictions, FG_predictions, F_predictions);
-
+ 
     // END: FINAL CONCAT
     NSLog(@"%f, %f", final_predictions[0], final_predictions[1]);
     CGPoint pp = CGPointMake(final_predictions[0], final_predictions[1]);
@@ -416,7 +420,8 @@
 - (float*) classifyNtwk: (int)inputSize a:(void*) inputImage b:(NSString*) ntwkFileName c:(NSString*) directory {
     NSString* networkPath = [[NSBundle mainBundle] pathForResource:ntwkFileName ofType:@"ntwk" inDirectory:directory];
     assert(networkPath != NULL);
-    void* network = jpcnn_create_network(inputSize, [networkPath UTF8String]);
+//    void* network = jpcnn_create_network(inputSize, [networkPath UTF8String]);
+    void* network = jpcnn_create_network([networkPath UTF8String]);
     assert(network != NULL);
     
     float* predictions;

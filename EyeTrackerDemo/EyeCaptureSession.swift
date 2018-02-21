@@ -48,9 +48,9 @@ import UIKit
 /// frames are being processed, and process frames using the most recent face
 /// detection. A face detector could be used explicitly on each frame, but this
 /// is much faster.
-class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {  // We must inherit from NSObject to implement the AV protocols.
+class EyeCaptureSession: NSObject {  // We must inherit from NSObject to implement the AV protocols.
     
-    var circleTimer: NSTimer?
+    var circleTimer: Timer?
     let redLayer = CALayer()
     let circleRadius = CGFloat(25)
     
@@ -144,10 +144,10 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
     // modified.
     // TODO: This should be a parameter to init; for now, it should be able to
     // be modified directly whenever.
-    let supportedOrientations = Set<UIDeviceOrientation>([.Portrait, .LandscapeLeft, .LandscapeRight, .PortraitUpsideDown])
+    let supportedOrientations = Set<UIDeviceOrientation>([.portrait, .landscapeLeft, .landscapeRight, .portraitUpsideDown])
     // If the device orientation is not supported, set it to .Portrait. This
     // will be updated each time a face is detected.
-    var currDeviceOrientation = UIDeviceOrientation.Portrait
+    var currDeviceOrientation = UIDeviceOrientation.portrait
     enum EXIFOrientation: Int32 {
         case TopLeft     = 1 // 0th row is at the top; 0th column is on the left (default).
         case TopRight    = 2 // 0th row is at the top; 0th column is on the right.
@@ -180,9 +180,9 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         self.leftEyeView = leftEyeView
         
         // Set up both eye detectors.
-        eyeDetectorCV = CVEyeDetector(cascadeFilename: NSBundle.mainBundle().pathForResource("haarcascade_eye", ofType: "xml"))
+        eyeDetectorCV = CVEyeDetector(cascadeFilename: Bundle.main.path(forResource: "haarcascade_eye", ofType: "xml"))
         eyeDetectorCV.setDebugView(self.debugView)
-        eyeDetectorCI = CIDetector(ofType: CIDetectorTypeFace, context: self.faceImageContext, options: [CIDetectorAccuracy: CIDetectorAccuracyLow])
+        eyeDetectorCI = CIDetector(ofType: CIDetectorTypeFace, context: self.faceImageContext, options: [CIDetectorAccuracy: CIDetectorAccuracyLow])!
         
         super.init()
         
@@ -207,6 +207,415 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         self.detectionLockFaceFrame = nil
     }
     
+    // MARK: - Helper Methods
+    func setUpCaptureSession() {
+        // TODO: The following will crash in a simulator; check to provide a better error message?
+        // TODO: I believe this asks the user for camera permissions; warn first?
+        
+        // Some of this code comes from the following link:
+        // https://github.com/ShinobiControls/iOS7-day-by-day/tree/master/18-coreimage-features
+        self.captureSession = AVCaptureSession()
+        self.captureSession.sessionPreset = AVCaptureSession.Preset.vga640x480
+        
+        // Get the front-facing camera.
+        let devices = AVCaptureDevice.devices(for: AVMediaType.video) as [AVCaptureDevice]!
+        var frontFacingCamera: AVCaptureDevice?
+        for device in devices! {
+            if (device.position == AVCaptureDevice.Position.front) {
+                frontFacingCamera = device
+            }
+        }
+        
+        if frontFacingCamera == nil {
+            fatalError("Error: Failed to find the front-facing camera.")
+            // Alternatively, use AVCaptureDevice.defaultDeviceWithMediaType(AVMediaTypeVideo), which should be the back-facing camera.
+        }
+        
+        // Add input and output to the session.
+        let input = try? AVCaptureDeviceInput(device: frontFacingCamera!)
+        if let input = input {
+            self.captureSession.addInput(input)
+        } else {
+            fatalError("Error: Failed to initialize video device.")
+        }
+        
+        // Output to respond to faces.
+        let metadataOutput = AVCaptureMetadataOutput()
+        self.captureSession.addOutput(metadataOutput)
+        // Now that the output has been added, we can set the metadata type to recognize faces.
+//        metadataOutput.metadataObjectTypes = [AVMetadataObject.ObjectType.faceAVMetadataObject.ObjectType.face] old
+        metadataOutput.metadataObjectTypes = [.face]
+        // Configure this class as the delegate and call it on the main thread. We could use a
+        // different thread, but we would need to make sure to manipulate the UI in the main
+        // thread. This should be fast enough, ideally.
+//        let metadataOutputQueue = dispatch_queue_create("MetadataOutputQueue", DISPATCH_QUEUE_SERIAL)
+        let metadataOutputQueue = DispatchQueue(label: "MetadataOutputQueue")
+        metadataOutput.setMetadataObjectsDelegate(self, queue: metadataOutputQueue)
+        
+        // Output to process frame data.
+        // TODO: Probably make these member variables.
+        let frameOutput = AVCaptureVideoDataOutput()
+        self.captureSession.addOutput(frameOutput)
+        // Create a queue to process frames on. It must be serial so that frames
+        // are processed in order. If this queue is blocked, frames may be
+        // immediately dropped, depending on the setting of
+        // alwaysDiscardsLateFrames.
+//        let frameOutputQueue = dispatch_queue_create("FrameOutputQueue", DISPATCH_QUEUE_SERIAL)
+        let frameOutputQueue = DispatchQueue(label: "FrameOutputQueue")
+        frameOutput.setSampleBufferDelegate(self, queue: frameOutputQueue)
+        // TODO: Consider the following configs from Apple's SquareCam example code.
+        // Convert to BGRA now because CoreGraphics and OpenGL work well with 'BGRA'. Default output is YUV.
+        // var rgbOutputSettings: [NSObject: AnyObject] = [kCVPixelBufferPixelFormatTypeKey: NSNumber(integer: kCMPixelFormat_32BGRA)]  // Why is this type annotation necessary?
+        // frameOutput.videoSettings = rgbOutputSettings
+        frameOutput.alwaysDiscardsLateVideoFrames = true  // Discard if the data output queue is blocked.
+        
+        // Set up the videoPreviewLayer, whether it is displayed or not.
+        //self.videoPreviewLayer = AVCaptureVideoPreviewLayer(session: self.captureSession)
+        //self.videoPreviewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill
+        //setUpVideoView()
+        
+        self.captureSession.startRunning()
+    }
+    
+    func setUpVideoView() {
+        self.videoPreviewLayer.removeFromSuperlayer()  // Remove from any other views, if necessary.
+        // If the new videoView isn't nil, set it up with the videoPreviewLayer.
+        if let videoView = self.videoView {
+            // The following scales the preview layer to be the view's current
+            // size (i.e., the original size if called in viewDidLoad) but you
+            // should probably also do this in viewDidLayoutSubviews.
+            self.videoPreviewLayer.frame = videoView.layer.bounds
+            videoView.layer.insertSublayer(self.videoPreviewLayer, at: 0)  // Add the video layer behind everything.
+        }
+        // Layer position is set in viewDidLayoutSubviews to respond appropriately to layout constraints.
+    }
+    
+    // Assuming the image passed is a face crop with the perspective of the
+    // camera (i.e., as opposed to the mirrored version for viewing, but still
+    // oriented so that the face is upright), "left eye" will refer to the
+    // person's actual, physical, left eye and vice versa for the right eye.
+    //
+    // The CIImage input argument should be translated to the origin if the
+    // CIDetector is used. Cropping in CoreImage simply blanks out the area
+    // outside of the specified rectangle without changing the coordinates of
+    // the cropped area, thus, detected faces (using CIDetector) would be
+    // relative to the original image rather than the face crop. We desire the
+    // latter.
+    // Read more: http://stackoverflow.com/questions/9601242/cropping-ciimage-with-cicrop-isnt-working-properly
+    //
+    // This method operates in the CoreImage coordinate space, with the origin
+    // at the bottom left. Using these results in UIKit will require flipping the
+    // y-axis. This method should really only be used via this class's delegate.
+    func findEyes(faceImage: CIImage) -> (leftEye: CGRect?, rightEye: CGRect?, leftEyeClosed: Bool?, rightEyeClosed: Bool?) {
+        var leftEyeRect, rightEyeRect: CGRect
+        var leftEyeClosed, rightEyeClosed: Bool?
+        let faceRect = faceImage.extent
+        switch selectedDetector {
+        case .CIDetector:
+            // Downscale the image for better performance.
+            let newWidth = CGFloat(219)
+            let scaleFactor = newWidth / faceRect.width
+            let scaleFactorInverse = faceRect.width / newWidth
+            
+            let faceImageResized = faceImage.transformed(by: CGAffineTransform(scaleX: scaleFactor, y: scaleFactor))
+            let faceWidthResized = newWidth
+            let faceHeightResized = faceRect.height * scaleFactor
+            
+            let features = self.eyeDetectorCI.features(in: faceImageResized, options: [CIDetectorImageOrientation: NSNumber(value: 0), CIDetectorEyeBlink: self.detectBlinks])  // Orientation of 0 because the cropped image has already been rotated.
+            if features.count < 1 {
+                if let debugView = self.debugView {
+                    let debugImage = UIImage(cgImage: self.faceImageContext.createCGImage(faceImageResized, from: faceImageResized.extent)!)
+                    DispatchQueue.main.async() {
+                        debugView.image = debugImage
+                    }
+                }
+                return (nil, nil, nil, nil)
+            } else {
+                let bestFace = features[0] as! CIFaceFeature
+                if !bestFace.hasLeftEyePosition || !bestFace.hasRightEyePosition {
+                    if self.debugView != nil {
+                        let debugImage = UIImage(cgImage: self.faceImageContext.createCGImage(faceImageResized, from: faceImageResized.extent)!)
+                        DispatchQueue.main.async() {
+                            self.debugView!.image = debugImage
+                        }
+                    }
+                    return (nil, nil, nil, nil)
+                }
+                
+                // Decide how big the box surrounding each eye should be.
+                // CIDetector only gives points, not boxes.
+//                let boxSize = faceImage.extent.size.width * 0.2
+                let boxSize = faceWidthResized * 0.2
+                let boxSizeHalf = boxSize / 2
+                
+                if let debugView = self.debugView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
+                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
+                    var debugImage = UIImage(cgImage: self.faceImageContext.createCGImage(faceImageResized, from: faceImageResized.extent)!)
+                    //print("printing debugImage1 width ", debugImage.size.width, "printing debugImage1 height ", debugImage.size.height)
+                    // Draw the boxes directly onto the image.
+                    UIGraphicsBeginImageContext(debugImage.size)
+                    debugImage.draw(at: CGPoint.zero)
+                    let ctx = UIGraphicsGetCurrentContext()
+                    UIColor.green.setStroke()
+                    // Left and right are swapped, as described below.
+                    let leftEyeRectDebug = CGRect(
+                        x: bestFace.rightEyePosition.x - boxSizeHalf,
+                        y: faceHeightResized - (bestFace.rightEyePosition.y - boxSizeHalf) - boxSize,  // Flip y-axis for drawing in UIKit.
+                        width: boxSize, height: boxSize)
+                    let rightEyeRectDebug = CGRect(
+                        x: bestFace.leftEyePosition.x - boxSizeHalf,
+                        y: faceHeightResized - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
+                        width: boxSize, height: boxSize)
+                    ctx!.stroke(leftEyeRectDebug, width: 1.0)
+                    ctx!.stroke(rightEyeRectDebug, width: 1.0)
+                    debugImage = UIGraphicsGetImageFromCurrentImageContext()!
+                    //print("printing debugImage2 width ", debugImage.size.width, "printing debugImage2 height ", debugImage.size.height)
+                    UIGraphicsEndImageContext()
+                    DispatchQueue.main.async() {
+                        debugView.image = debugImage
+                    }
+                }
+
+                if let rightEyeView = self.rightEyeView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
+                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
+                    let rightEyeRectDebug = CGRect(
+                        x: bestFace.leftEyePosition.x - boxSizeHalf,
+                        y: faceHeightResized - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
+                        width: boxSize, height: boxSize)
+
+                    let rightEyeImage = UIImage(cgImage: self.faceImageContext.createCGImage(faceImageResized, from: faceImageResized.extent)!)
+                    
+//                    let rightEyeRectDebug = CGRect(
+//                        x: bestFace.leftEyePosition.x - boxSizeHalf,
+//                        y: faceImageResized.extent.size.height - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
+//                        width: boxSize, height: boxSize)
+//                    
+//                    let rightEyeImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImage, fromRect: faceImage.extent))
+
+                    //print("printing bestFace width ", bestFace.bounds.width, "printing bestFace height ", bestFace.bounds.height)
+                    
+                    //print("printing faceImage width ", faceImage.extent.size.width, "printing faceImage height ", faceImage.extent.size.height)
+                    //print("printing rightEyeImage width ", rightEyeImage.size.width, "printing rightEyeImage height ", rightEyeImage.size.height)
+                    // Create bitmap image from context using the rect
+                    let imageRef: CGImage = rightEyeImage.cgImage!.cropping(to: rightEyeRectDebug)!
+//                    let imageRef: CGImage = CGImageCreateWithImageInRect(rightEyeImage.CGImage!, rightEyeRectDebug)!
+                    // Create a new image based on the imageRef and rotate back to the original orientation
+                    let rightEyeDebugImage: UIImage = UIImage(cgImage: imageRef)
+                    //print("printing rightEyeRectDebug width ", rightEyeRectDebug.size.width, "printing rightEyeRectDebug height ", rightEyeRectDebug.size.height)
+                    //print("printing rightEyeDebug width ", rightEyeDebugImage.size.width, "printing rightEyeDebug height ", rightEyeDebugImage.size.height)
+                    DispatchQueue.main.async {
+                        rightEyeView.image = rightEyeDebugImage
+                    }
+                }
+                
+                if let leftEyeView = self.leftEyeView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
+                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
+                    
+                    let leftEyeRectDebug = CGRect(
+                        x: bestFace.rightEyePosition.x - boxSizeHalf,
+                        y: faceHeightResized - (bestFace.rightEyePosition.y - boxSizeHalf) - boxSize,  // Flip y-axis for drawing in UIKit.
+                        width: boxSize, height: boxSize)
+                    
+                    let leftEyeImage = UIImage(cgImage: self.faceImageContext.createCGImage(faceImageResized, from: faceImageResized.extent)!)
+                    
+                    // Create bitmap image from context using the rect
+                    
+                    let imageRef: CGImage = leftEyeImage.cgImage!.cropping(to: leftEyeRectDebug)!
+                    // Create a new image based on the imageRef and rotate back to the original orientation
+                    let leftEyeDebugImage: UIImage = UIImage(cgImage: imageRef)
+                    
+                    DispatchQueue.main.async() {
+                        leftEyeView.image = leftEyeDebugImage
+                    }
+                }
+                
+                
+                // "'Right' is relative to the original (non-mirrored) image orientation, not to the owner of the eye."
+                // From: https://developer.apple.com/library/prerelease/ios/documentation/CoreImage/Reference/CIFaceFeature/index.html#//apple_ref/occ/instp/CIFaceFeature/rightEyeClosed
+                // In this project code, "right" refers to the owner right eye, so we need to swap them.
+                leftEyeRect = CGRect(
+                    x: (bestFace.rightEyePosition.x - boxSizeHalf) * scaleFactorInverse,
+                    y: (bestFace.rightEyePosition.y - boxSizeHalf) * scaleFactorInverse,  // No need to flip the y-axis since we should return CoreImage coordinates.
+                    width: boxSize * scaleFactorInverse, height: boxSize * scaleFactorInverse)
+                rightEyeRect = CGRect(
+                    x: (bestFace.leftEyePosition.x - boxSizeHalf) * scaleFactorInverse,
+                    y: (bestFace.leftEyePosition.y - boxSizeHalf) * scaleFactorInverse,
+                    width: boxSize * scaleFactorInverse, height: boxSize * scaleFactorInverse)
+                if self.detectBlinks {
+                    leftEyeClosed = bestFace.rightEyeClosed
+                    rightEyeClosed = bestFace.leftEyeClosed
+                }
+            }
+        case .OpenCV:
+            let faceImageUI = UIImage(cgImage: self.faceImageContext.createCGImage(faceImage, from: faceImage.extent)!)
+            let eyesArray = self.eyeDetectorCV.detectAllEyes(faceImageUI)
+            
+            // If we can't find two eyes, don't return any.
+            if (eyesArray?.count)! < 2 {
+                return (nil, nil, nil, nil)
+            }
+            
+            // We have two or more detections now. Choose the leftmost and
+            // rightmost boxes, as those tend to be the correct ones. Unless all
+            // of the detections have the same x value, they should be
+            // different boxes.
+            // TODO: Apply more heuristics to improve OpenCV detections.
+            leftEyeRect = (eyesArray!.object(at: 0) as AnyObject).cgRectValue
+            rightEyeRect = (eyesArray!.object(at: 0) as AnyObject).cgRectValue
+            for index in 1..<eyesArray!.count {
+                let eyeRect = (eyesArray?.object(at: index) as AnyObject).cgRectValue
+                if (eyeRect?.origin.x)! < rightEyeRect.origin.x {
+                    rightEyeRect = eyeRect!
+                }
+                if (eyeRect?.origin.x)! > leftEyeRect.origin.x {
+                    leftEyeRect = eyeRect!
+                }
+            }
+            // Coordinates were returned in cv::Mat coordinate space (same as
+            // UIKit). Flip the y-axis to return to CIImage space.
+            leftEyeRect = leftEyeRect.rectWithFlippedY(inFrame: faceRect)
+            rightEyeRect = rightEyeRect.rectWithFlippedY(inFrame: faceRect)
+            
+            // NOTE: OpenCV does not detect blinks as it is now.
+        }
+        
+        // Run the eye rectangles through the Kalman filter to smooth out
+        // predictions.
+        let leftEyePoint = self.enableTemporalSmoothing ? self.kalmanFilterLeft?.processPoint(leftEyeRect.origin) : leftEyeRect.origin
+        let rightEyePoint = self.enableTemporalSmoothing ? self.kalmanFilterRight?.processPoint(rightEyeRect.origin) : rightEyeRect.origin
+        leftEyeRect.origin = leftEyePoint!
+        rightEyeRect.origin = rightEyePoint!
+        
+        //setup()
+        return (leftEyeRect, rightEyeRect, leftEyeClosed, rightEyeClosed)
+    }
+
+    func setup() {
+//        TestNtwkFile.testNtwkFile()
+        
+        redLayer.frame = CGRect(x: 50, y: 50, width: 50, height: 50)
+        redLayer.backgroundColor = UIColor.red.cgColor
+        
+        // Round corners
+        redLayer.cornerRadius = circleRadius
+        
+        // Set border
+        redLayer.borderColor = UIColor.black.cgColor
+        redLayer.borderWidth = 10
+        
+        redLayer.shadowColor = UIColor.black.cgColor
+        redLayer.shadowOpacity = 0.8
+        redLayer.shadowOffset = CGSize(width: 2, height: 2)
+        redLayer.shadowRadius = 3
+        
+        self.videoView!.layer.addSublayer(redLayer)
+        
+        
+        // Create a blank animation using the keyPath "cornerRadius", the property we want to animate
+        let animation = CABasicAnimation(keyPath: "shadowRadius")
+        
+        // Set the starting value
+        animation.fromValue = redLayer.cornerRadius
+        
+        // Set the completion value
+        animation.toValue = 0
+        
+        // How may times should the animation repeat?
+        animation.repeatCount = 1000
+        
+        // Finally, add the animation to the layer
+        redLayer.add(animation, forKey: "cornerRadius")
+        
+        circleTimer = Timer.scheduledTimer(timeInterval: 1, target: self, selector: Selector(("randomizeCirclePosition")), userInfo: nil, repeats: true)
+    }
+    
+    func randomizeCirclePosition() {
+        let minX = 0
+        let maxX = 375
+        let minY = 0
+        let maxY = 667
+        
+        let preferredMinX = CGFloat(minX) + self.circleRadius * 2
+        let preferredMaxX = CGFloat(maxX) - self.circleRadius * 2
+        let preferredMinY = CGFloat(minY) + self.circleRadius * 2
+        let preferredMaxY = CGFloat(maxY) - self.circleRadius * 2
+        
+        let randomX = CGFloat(arc4random_uniform(UInt32(preferredMaxX - preferredMinX))) + preferredMinX
+        let randomY = CGFloat(arc4random_uniform(UInt32(preferredMaxY - preferredMinY))) + preferredMinY
+        
+        let point = CGPoint(x: randomX, y: randomY)
+        self.redLayer.animateToPosition(newPosition: point)
+    }
+    
+    // TODO: Provide a concrete example in the documentation.
+    /// Determine where the video preview is positioned within its view. This
+    /// enables one to account for scale and clipping of the video preview, so
+    /// image coordinates can be converted into display coordinates.
+    ///
+    /// This method was adapted from Apple's SquareCam demo. If raw frame data
+    /// should be used instead (as is done in SquareCam's original code),
+    /// imageSize's width and height should be flipped.
+    ///
+    /// - parameter gravity:   The gravity setting of the preview layer. This
+    ///                   determines how the video is positioned.
+    /// - parameter viewSize:  The size of the view in which the video preview is
+    ///                   displayed.
+    /// - parameter imageSize: The size of the oriented video data (which is
+    ///                   displayed on the preview layer).
+    ///
+    /// - returns: A CGRect describing the position and size of the video
+    ///           preview.
+    static func videoPreviewBoxForGravity(gravity: String, viewSize: CGSize, imageSize: CGSize) -> CGRect {
+        let imageRatio = imageSize.width / imageSize.height
+        let viewRatio = viewSize.width / viewSize.height
+        
+        var size = CGSize.zero
+        // TODO: Test this method for all gravities. Currently, only the top one has been tested.
+        if gravity == AVLayerVideoGravity.resizeAspectFill.rawValue {
+            if viewRatio > imageRatio {
+                size.width = viewSize.width
+                size.height = imageSize.height * (viewSize.width / imageSize.width)
+            } else {
+                size.width = imageSize.width * (viewSize.height / imageSize.height)
+                size.height = viewSize.height
+            }
+        } else if gravity == AVLayerVideoGravity.resizeAspect.rawValue {
+            if viewRatio > imageRatio {
+                size.width = imageSize.width * (viewSize.height / imageSize.height)
+                size.height = viewSize.height
+            } else {
+                size.width = viewSize.width
+                size.height = imageSize.height * (viewSize.width / imageSize.width)
+            }
+        } else if gravity == AVLayerVideoGravity.resize.rawValue {
+            size.width = viewSize.width
+            size.height = viewSize.height
+        }
+        
+        var videoPreviewBox = CGRect()
+        videoPreviewBox.size = size
+        if size.width < viewSize.width {
+            videoPreviewBox.origin.x = (viewSize.width - size.width) / 2
+        } else {
+            videoPreviewBox.origin.x = (size.width - viewSize.width) / 2
+        }
+        
+        if size.height < viewSize.height {
+            videoPreviewBox.origin.y = (viewSize.height - size.height) / 2
+        } else {
+            videoPreviewBox.origin.y = (size.height - viewSize.height) / 2
+        }
+        
+        return videoPreviewBox
+    }
+    
+}
+
+extension EyeCaptureSession : AVCaptureMetadataOutputObjectsDelegate {
+
+}
+
+extension EyeCaptureSession : AVCaptureVideoDataOutputSampleBufferDelegate {
     // MARK: - AVCapture Delegate Methods
     
     // Detect faces on the GPU.
@@ -218,13 +627,13 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             // println("Warning: Metadata handler was called without any metadata objects to process.")
             return
         }
-        if metadataObjects[0].type != AVMetadataObjectTypeFace {
+        if metadataObjects[0].type != AVMetadataObject.ObjectType.face {
             print("Warning: Found a non-face metadata. Is the detector configured to only find faces?")
             return
         }
         
         // Get the latest device orientation.
-        let newOrientation = UIDevice.currentDevice().orientation
+        let newOrientation = UIDevice.current.orientation
         // If the device changes to an unsupported orientation, leave it as the
         // previous orientation.
         if newOrientation != self.currDeviceOrientation && self.supportedOrientations.contains(newOrientation) {
@@ -260,14 +669,15 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
     // changes must be done on a different thread. Frames will be dropped when
     // this method takes too long.
     func captureOutput(captureOutput: AVCaptureOutput!, didOutputSampleBuffer sampleBuffer: CMSampleBuffer!, fromConnection connection: AVCaptureConnection!) {
-        if ++self.contextFix > self.contextFixFrequency {
+        self.contextFix += 1
+        if self.contextFix > self.contextFixFrequency {
             self.faceImageContext = CIContext(options: nil)
         }
         
         let now = NSDate()
         if let maximumFPS = self.maximumFPS {
             if let mostRecentFrameTime = self.mostRecentFrameTime {
-                if now.timeIntervalSinceDate(mostRecentFrameTime) < 1.0 / Double(maximumFPS) {
+                if now.timeIntervalSince(mostRecentFrameTime as Date) < 1.0 / Double(maximumFPS) {
                     return  // Pretend this frame never happened.
                 }
             }
@@ -286,28 +696,28 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         var fullFrameExtent: CGRect!
         let attachments = CMCopyDictionaryOfAttachments(kCFAllocatorDefault, sampleBuffer, CMAttachmentMode(kCMAttachmentMode_ShouldPropagate)) as? [String : AnyObject]  // Contains extra info about the frame, such as the clean aperture. Read more: https://developer.apple.com/library/mac/documentation/GraphicsImaging/Conceptual/CoreVideo/CVProg_Concepts/CVProg_Concepts.html#//apple_ref/doc/uid/TP40001536-CH202-DontLinkElementID_4
         // NOTE: This broke in Xcode 7.0/Swift 2.0. Using "as?" may mean this always produces nil, but it is not essential that we copy attachments.
-        image = CIImage(CVPixelBuffer: CMSampleBufferGetImageBuffer(sampleBuffer)!, options: attachments)
+        image = CIImage(cvPixelBuffer: CMSampleBufferGetImageBuffer(sampleBuffer)!, options: attachments)
         
         // Determine orientation.
         var currEXIFOrientation: EXIFOrientation
         switch self.currDeviceOrientation {
-        case .PortraitUpsideDown:
+        case .portraitUpsideDown:
             // Even though this isn't supported now, it could be later by
             // adding this to supportedOrientations.
             currEXIFOrientation = .LeftBottom
-        case .LandscapeLeft:
+        case .landscapeLeft:
             // Front-facing camera.
             currEXIFOrientation = .BottomRight
-            // For the back-facing camera, use .TopLeft.
-        case .LandscapeRight:
+        // For the back-facing camera, use .TopLeft.
+        case .landscapeRight:
             // Front-facing camera.
             currEXIFOrientation = .TopLeft
-            // For the back-facing camera, use .BottomRight.
+        // For the back-facing camera, use .BottomRight.
         default:  // .Portrait is the default.
             currEXIFOrientation = .RightTop
         }
         
-        image = image.imageByApplyingOrientation(currEXIFOrientation.rawValue)
+        image = image.oriented(forExifOrientation: currEXIFOrientation.rawValue)
         // NOTE: CIImage operations could be chained together for a potential
         // performance bump (though likely minor). This could also include the
         // resize operation that's in findEyes.
@@ -329,8 +739,8 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         // face is in the center: CIDetector needs some padding on all sides to
         // operate properly and the CVEyeDetector is optimized by cropping out
         // the eye area (which assumes that the face is centered in the box).
-        image = image.imageByClampingToExtent()
-        ff.fullFrame = UIImage(CGImage: self.faceImageContext.createCGImage(image, fromRect: fullFrameExtent))
+        image = image.clampedToExtent()
+        ff.fullFrame = UIImage(cgImage: self.faceImageContext.createCGImage(image, from: fullFrameExtent)!)
         ff.fullFrameSize = fullFrameSize
         ff.deviceOrientation = self.currDeviceOrientation  // This may be overwritten if face detection is locked.
         // Done saving frame image.
@@ -349,18 +759,18 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             // Save the current image in there.
             let scaledFaceRect = lff.faceRect!.rectWithFlippedY(inFrame: fullFrameSize)  // Flip back to CI coordinates.
             // lff should definitely have a faceRect, since we only lock it when a faceRect is found.
-            let faceCropCI = image.imageByCroppingToRect(scaledFaceRect)
-            ff.faceCrop = UIImage(CGImage: self.faceImageContext.createCGImage(faceCropCI, fromRect: faceCropCI.extent))
+            let faceCropCI = image.cropped(to: scaledFaceRect)
+            ff.faceCrop = UIImage(cgImage: self.faceImageContext.createCGImage(faceCropCI, from: faceCropCI.extent)!)
         } else if let unscaledFaceRect = self.metadataFaceRect {  // Face detected; not locked.
             var rollCorrection = 0.0
             switch self.currDeviceOrientation {
-            case .Portrait:
+            case .portrait:
                 rollCorrection = 90.0
-            case .LandscapeLeft:
+            case .landscapeLeft:
                 rollCorrection = 180.0
-            case .LandscapeRight:
+            case .landscapeRight:
                 rollCorrection = 0.0
-            case .PortraitUpsideDown:
+            case .portraitUpsideDown:
                 rollCorrection = 270.0
             default:
                 fatalError("Unsupported orientation when correcting face roll.")
@@ -372,7 +782,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             // supported).
             var correctedFaceRoll: CGFloat?
             if let metadataFaceRoll = self.metadataFaceRoll {
-                correctedFaceRoll = CGFloat((360.0 - (Double(metadataFaceRoll) + rollCorrection) + 360.0) % 360.0)
+                correctedFaceRoll = CGFloat((360.0 - (Double(metadataFaceRoll) + rollCorrection) + 360.0).truncatingRemainder(dividingBy: 360.0))
             }
             
             ff.faceYaw = self.metadataFaceYaw
@@ -387,7 +797,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             // be in CoreImage coordinate space.
             var scaledFaceRect = CGRect()
             switch self.currDeviceOrientation {
-            case .Portrait:
+            case .portrait:
                 let scaledX = unscaledFaceRect.origin.x * ff.fullFrameSize!.height
                 let scaledY = unscaledFaceRect.origin.y * ff.fullFrameSize!.width
                 let scaledW = unscaledFaceRect.width * ff.fullFrameSize!.height
@@ -397,7 +807,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
                     y: ff.fullFrameSize!.height - (scaledX + scaledW),
                     width: scaledH,
                     height: scaledW)
-            case .LandscapeLeft:  // Home button on the right side.
+            case .landscapeLeft:  // Home button on the right side.
                 let scaledX = unscaledFaceRect.origin.x * ff.fullFrameSize!.width
                 let scaledY = unscaledFaceRect.origin.y * ff.fullFrameSize!.height
                 let scaledW = unscaledFaceRect.width * ff.fullFrameSize!.width
@@ -407,7 +817,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
                     y: scaledY,
                     width: scaledW,
                     height: scaledH)
-            case .LandscapeRight:  // Home button on the left side.
+            case .landscapeRight:  // Home button on the left side.
                 let scaledY = unscaledFaceRect.origin.y * ff.fullFrameSize!.height
                 let scaledX = unscaledFaceRect.origin.x * ff.fullFrameSize!.width
                 let scaledW = unscaledFaceRect.width * ff.fullFrameSize!.width
@@ -417,7 +827,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
                     y: ff.fullFrameSize!.height - (scaledY + scaledH),
                     width: scaledW,
                     height: scaledH)
-            case .PortraitUpsideDown:
+            case .portraitUpsideDown:
                 let scaledX = unscaledFaceRect.origin.x * ff.fullFrameSize!.height
                 let scaledY = unscaledFaceRect.origin.y * ff.fullFrameSize!.width
                 let scaledW = unscaledFaceRect.width * ff.fullFrameSize!.height
@@ -444,9 +854,9 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             
             // Crop the face without padding first.
             ff.faceRect = scaledFaceRect.rectWithFlippedY(inFrame: ff.fullFrameSize!)
-            let faceCropCI = image.imageByCroppingToRect(scaledFaceRect)
-            ff.faceCrop = UIImage(CGImage: self.faceImageContext.createCGImage(faceCropCI, fromRect: faceCropCI.extent))
-            ff.fullFrame = UIImage(CGImage: self.faceImageContext.createCGImage(image, fromRect: fullFrameExtent))
+            let faceCropCI = image.cropped(to: scaledFaceRect)
+            ff.faceCrop = UIImage(cgImage: self.faceImageContext.createCGImage(faceCropCI, from: faceCropCI.extent)!)
+            ff.fullFrame = UIImage(cgImage: self.faceImageContext.createCGImage(image, from: fullFrameExtent)!)
             
             // Adjust the scaledFaceRect to reflect the padding.
             scaledFaceRect.origin.x -= padding
@@ -454,13 +864,13 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
             scaledFaceRect.size.width += 2 * padding
             scaledFaceRect.size.height += 2 * padding
             
-            var faceCropPadded = image.imageByCroppingToRect(scaledFaceRect)
-            faceCropPadded = faceCropPadded.imageByApplyingTransform(CGAffineTransformMakeTranslation(-faceCropPadded.extent.origin.x, -faceCropPadded.extent.origin.y))  // Translate to the origin so that CIDetector detections are relative to this crop, not the original.
+            var faceCropPadded = image.cropped(to: scaledFaceRect)
+            faceCropPadded = faceCropPadded.transformed(by: CGAffineTransform(translationX: -faceCropPadded.extent.origin.x, y: -faceCropPadded.extent.origin.y))  // Translate to the origin so that CIDetector detections are relative to this crop, not the original.
             
             let timeA = NSDate()
-            var (leftEye, rightEye, leftEyeClosed, rightEyeClosed) = findEyes(faceCropPadded)
+            var (leftEye, rightEye, leftEyeClosed, rightEyeClosed) = findEyes(faceImage: faceCropPadded)
             let timeB = NSDate()
-            self.lastDetectionDuration = Int(round(timeB.timeIntervalSinceDate(timeA) * 1000))  // Store the time in milliseconds.
+            self.lastDetectionDuration = Int(round(timeB.timeIntervalSince(timeA as Date) * 1000))  // Store the time in milliseconds.
             
             // Remove padding.
             if leftEye != nil {
@@ -492,7 +902,7 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         // Call delegate whether a face was found or not.
         // TODO: Confirm that the bounds are within the image/face. If not,
         //       clip.
-        delegate?.processFace(ff)
+        delegate?.processFace(faceFrame: ff)
         
         // If we just processed a face, clear it.
         if self.metadataFaceRect != nil {
@@ -515,406 +925,8 @@ class EyeCaptureSession: NSObject, AVCaptureMetadataOutputObjectsDelegate, AVCap
         self.processingFrame = false
     }
     
-    func captureOutput(captureOutput: AVCaptureOutput!, didDropSampleBuffer sampleBuffer: CMSampleBuffer!, fromConnection connection: AVCaptureConnection!) {
+    func captureOutput(_ captureOutput: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         // TODO: Call a dropped frame delegate.
     }
-    
-    // MARK: - Helper Methods
-    
-    func setUpCaptureSession() {
-        // TODO: The following will crash in a simulator; check to provide a better error message?
-        // TODO: I believe this asks the user for camera permissions; warn first?
-        
-        // Some of this code comes from the following link:
-        // https://github.com/ShinobiControls/iOS7-day-by-day/tree/master/18-coreimage-features
-        self.captureSession = AVCaptureSession()
-        self.captureSession.sessionPreset = AVCaptureSessionPreset640x480
-        
-        // Get the front-facing camera.
-        let devices = AVCaptureDevice.devicesWithMediaType(AVMediaTypeVideo) as! [AVCaptureDevice]!
-        var frontFacingCamera: AVCaptureDevice?
-        for device in devices {
-            if (device.position == AVCaptureDevicePosition.Front) {
-                frontFacingCamera = device
-            }
-        }
-        
-        if frontFacingCamera == nil {
-            fatalError("Error: Failed to find the front-facing camera.")
-            // Alternatively, use AVCaptureDevice.defaultDeviceWithMediaType(AVMediaTypeVideo), which should be the back-facing camera.
-        }
-        
-        // Add input and output to the session.
-        let input = try? AVCaptureDeviceInput(device: frontFacingCamera)
-        if let input = input {
-            self.captureSession.addInput(input)
-        } else {
-            fatalError("Error: Failed to initialize video device.")
-        }
-        
-        // Output to respond to faces.
-        let metadataOutput = AVCaptureMetadataOutput()
-        self.captureSession.addOutput(metadataOutput)
-        // Now that the output has been added, we can set the metadata type to recognize faces.
-        metadataOutput.metadataObjectTypes = [AVMetadataObjectTypeFace]
-        // Configure this class as the delegate and call it on the main thread. We could use a
-        // different thread, but we would need to make sure to manipulate the UI in the main
-        // thread. This should be fast enough, ideally.
-        let metadataOutputQueue = dispatch_queue_create("MetadataOutputQueue", DISPATCH_QUEUE_SERIAL)
-        metadataOutput.setMetadataObjectsDelegate(self, queue: metadataOutputQueue)
-        
-        // Output to process frame data.
-        // TODO: Probably make these member variables.
-        let frameOutput = AVCaptureVideoDataOutput()
-        self.captureSession.addOutput(frameOutput)
-        // Create a queue to process frames on. It must be serial so that frames
-        // are processed in order. If this queue is blocked, frames may be
-        // immediately dropped, depending on the setting of
-        // alwaysDiscardsLateFrames.
-        let frameOutputQueue = dispatch_queue_create("FrameOutputQueue", DISPATCH_QUEUE_SERIAL)
-        frameOutput.setSampleBufferDelegate(self, queue: frameOutputQueue)
-        // TODO: Consider the following configs from Apple's SquareCam example code.
-        // Convert to BGRA now because CoreGraphics and OpenGL work well with 'BGRA'. Default output is YUV.
-        // var rgbOutputSettings: [NSObject: AnyObject] = [kCVPixelBufferPixelFormatTypeKey: NSNumber(integer: kCMPixelFormat_32BGRA)]  // Why is this type annotation necessary?
-        // frameOutput.videoSettings = rgbOutputSettings
-        frameOutput.alwaysDiscardsLateVideoFrames = true  // Discard if the data output queue is blocked.
-        
-        // Set up the videoPreviewLayer, whether it is displayed or not.
-        //self.videoPreviewLayer = AVCaptureVideoPreviewLayer(session: self.captureSession)
-        //self.videoPreviewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill
-        //setUpVideoView()
-        
-        self.captureSession.startRunning()
-    }
-    
-    func setUpVideoView() {
-        self.videoPreviewLayer.removeFromSuperlayer()  // Remove from any other views, if necessary.
-        // If the new videoView isn't nil, set it up with the videoPreviewLayer.
-        if let videoView = self.videoView {
-            // The following scales the preview layer to be the view's current
-            // size (i.e., the original size if called in viewDidLoad) but you
-            // should probably also do this in viewDidLayoutSubviews.
-            self.videoPreviewLayer.frame = videoView.layer.bounds
-            videoView.layer.insertSublayer(self.videoPreviewLayer, atIndex: 0)  // Add the video layer behind everything.
-        }
-        // Layer position is set in viewDidLayoutSubviews to respond appropriately to layout constraints.
-    }
-    
-    // Assuming the image passed is a face crop with the perspective of the
-    // camera (i.e., as opposed to the mirrored version for viewing, but still
-    // oriented so that the face is upright), "left eye" will refer to the
-    // person's actual, physical, left eye and vice versa for the right eye.
-    //
-    // The CIImage input argument should be translated to the origin if the
-    // CIDetector is used. Cropping in CoreImage simply blanks out the area
-    // outside of the specified rectangle without changing the coordinates of
-    // the cropped area, thus, detected faces (using CIDetector) would be
-    // relative to the original image rather than the face crop. We desire the
-    // latter.
-    // Read more: http://stackoverflow.com/questions/9601242/cropping-ciimage-with-cicrop-isnt-working-properly
-    //
-    // This method operates in the CoreImage coordinate space, with the origin
-    // at the bottom left. Using these results in UIKit will require flipping the
-    // y-axis. This method should really only be used via this class's delegate.
-    func findEyes(faceImage: CIImage) -> (leftEye: CGRect?, rightEye: CGRect?, leftEyeClosed: Bool?, rightEyeClosed: Bool?) {
-        var leftEyeRect, rightEyeRect: CGRect
-        var leftEyeClosed, rightEyeClosed: Bool?
-        let faceRect = faceImage.extent
-        switch selectedDetector {
-        case .CIDetector:
-            // Downscale the image for better performance.
-            let newWidth = CGFloat(219)
-            let scaleFactor = newWidth / faceRect.width
-            let scaleFactorInverse = faceRect.width / newWidth
-            
-            let faceImageResized = faceImage.imageByApplyingTransform(CGAffineTransformMakeScale(scaleFactor, scaleFactor))
-            let faceWidthResized = newWidth
-            let faceHeightResized = faceRect.height * scaleFactor
-            
-            let features = self.eyeDetectorCI.featuresInImage(faceImageResized, options: [CIDetectorImageOrientation: NSNumber(integer: 0), CIDetectorEyeBlink: self.detectBlinks])  // Orientation of 0 because the cropped image has already been rotated.
-            if features.count < 1 {
-                if let debugView = self.debugView {
-                    let debugImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImageResized, fromRect: faceImageResized.extent))
-                    dispatch_async(dispatch_get_main_queue()) {
-                        debugView.image = debugImage
-                    }
-                }
-                return (nil, nil, nil, nil)
-            } else {
-                let bestFace = features[0] as! CIFaceFeature
-                if !bestFace.hasLeftEyePosition || !bestFace.hasRightEyePosition {
-                    if self.debugView != nil {
-                        let debugImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImageResized, fromRect: faceImageResized.extent))
-                        dispatch_async(dispatch_get_main_queue()) {
-                            self.debugView!.image = debugImage
-                        }
-                    }
-                    return (nil, nil, nil, nil)
-                }
-                
-                // Decide how big the box surrounding each eye should be.
-                // CIDetector only gives points, not boxes.
-//                let boxSize = faceImage.extent.size.width * 0.2
-                let boxSize = faceWidthResized * 0.2
-                let boxSizeHalf = boxSize / 2
-                
-                if let debugView = self.debugView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
-                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
-                    var debugImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImageResized, fromRect: faceImageResized.extent))
-                    //print("printing debugImage1 width ", debugImage.size.width, "printing debugImage1 height ", debugImage.size.height)
-                    // Draw the boxes directly onto the image.
-                    UIGraphicsBeginImageContext(debugImage.size)
-                    debugImage.drawAtPoint(CGPointZero)
-                    let ctx = UIGraphicsGetCurrentContext()
-                    UIColor.greenColor().setStroke()
-                    // Left and right are swapped, as described below.
-                    let leftEyeRectDebug = CGRect(
-                        x: bestFace.rightEyePosition.x - boxSizeHalf,
-                        y: faceHeightResized - (bestFace.rightEyePosition.y - boxSizeHalf) - boxSize,  // Flip y-axis for drawing in UIKit.
-                        width: boxSize, height: boxSize)
-                    let rightEyeRectDebug = CGRect(
-                        x: bestFace.leftEyePosition.x - boxSizeHalf,
-                        y: faceHeightResized - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
-                        width: boxSize, height: boxSize)
-                    CGContextStrokeRectWithWidth(ctx, leftEyeRectDebug, 1.0)
-                    CGContextStrokeRectWithWidth(ctx, rightEyeRectDebug, 1.0)
-                    debugImage = UIGraphicsGetImageFromCurrentImageContext()
-                    //print("printing debugImage2 width ", debugImage.size.width, "printing debugImage2 height ", debugImage.size.height)
-                    UIGraphicsEndImageContext()
-                    dispatch_async(dispatch_get_main_queue()) {
-                        debugView.image = debugImage
-                    }
-                }
-
-                if let rightEyeView = self.rightEyeView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
-                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
-                    let rightEyeRectDebug = CGRect(
-                        x: bestFace.leftEyePosition.x - boxSizeHalf,
-                        y: faceHeightResized - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
-                        width: boxSize, height: boxSize)
-
-                    let rightEyeImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImageResized, fromRect: faceImageResized.extent))
-                    
-//                    let rightEyeRectDebug = CGRect(
-//                        x: bestFace.leftEyePosition.x - boxSizeHalf,
-//                        y: faceImageResized.extent.size.height - (bestFace.leftEyePosition.y - boxSizeHalf) - boxSize,
-//                        width: boxSize, height: boxSize)
-//                    
-//                    let rightEyeImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImage, fromRect: faceImage.extent))
-
-                    //print("printing bestFace width ", bestFace.bounds.width, "printing bestFace height ", bestFace.bounds.height)
-                    
-                    //print("printing faceImage width ", faceImage.extent.size.width, "printing faceImage height ", faceImage.extent.size.height)
-                    //print("printing rightEyeImage width ", rightEyeImage.size.width, "printing rightEyeImage height ", rightEyeImage.size.height)
-                    // Create bitmap image from context using the rect
-                    let imageRef: CGImageRef = CGImageCreateWithImageInRect(rightEyeImage.CGImage, rightEyeRectDebug)!
-                    // Create a new image based on the imageRef and rotate back to the original orientation
-                    let rightEyeDebugImage: UIImage = UIImage(CGImage: imageRef)
-                    //print("printing rightEyeRectDebug width ", rightEyeRectDebug.size.width, "printing rightEyeRectDebug height ", rightEyeRectDebug.size.height)
-                    //print("printing rightEyeDebug width ", rightEyeDebugImage.size.width, "printing rightEyeDebug height ", rightEyeDebugImage.size.height)
-                    dispatch_async(dispatch_get_main_queue()) {
-                        rightEyeView.image = rightEyeDebugImage
-                    }
-                }
-                
-                if let leftEyeView = self.leftEyeView {  // Optional binding is necessary here, as an external tap event could make the debugView nil after verifying that it's not nil.
-                    // This could probably be drawn onto the context directly from the CIImage, though this is just for debugging.
-                    
-                    let leftEyeRectDebug = CGRect(
-                        x: bestFace.rightEyePosition.x - boxSizeHalf,
-                        y: faceHeightResized - (bestFace.rightEyePosition.y - boxSizeHalf) - boxSize,  // Flip y-axis for drawing in UIKit.
-                        width: boxSize, height: boxSize)
-                    
-                    let leftEyeImage = UIImage(CGImage: self.faceImageContext.createCGImage(faceImageResized, fromRect: faceImageResized.extent))
-                    
-                    // Create bitmap image from context using the rect
-                    let imageRef: CGImageRef = CGImageCreateWithImageInRect(leftEyeImage.CGImage, leftEyeRectDebug)!
-                    // Create a new image based on the imageRef and rotate back to the original orientation
-                    let leftEyeDebugImage: UIImage = UIImage(CGImage: imageRef)
-                    
-                    dispatch_async(dispatch_get_main_queue()) {
-                        leftEyeView.image = leftEyeDebugImage
-                    }
-                }
-                
-                
-                // "'Right' is relative to the original (non-mirrored) image orientation, not to the owner of the eye."
-                // From: https://developer.apple.com/library/prerelease/ios/documentation/CoreImage/Reference/CIFaceFeature/index.html#//apple_ref/occ/instp/CIFaceFeature/rightEyeClosed
-                // In this project code, "right" refers to the owner right eye, so we need to swap them.
-                leftEyeRect = CGRect(
-                    x: (bestFace.rightEyePosition.x - boxSizeHalf) * scaleFactorInverse,
-                    y: (bestFace.rightEyePosition.y - boxSizeHalf) * scaleFactorInverse,  // No need to flip the y-axis since we should return CoreImage coordinates.
-                    width: boxSize * scaleFactorInverse, height: boxSize * scaleFactorInverse)
-                rightEyeRect = CGRect(
-                    x: (bestFace.leftEyePosition.x - boxSizeHalf) * scaleFactorInverse,
-                    y: (bestFace.leftEyePosition.y - boxSizeHalf) * scaleFactorInverse,
-                    width: boxSize * scaleFactorInverse, height: boxSize * scaleFactorInverse)
-                if self.detectBlinks {
-                    leftEyeClosed = bestFace.rightEyeClosed
-                    rightEyeClosed = bestFace.leftEyeClosed
-                }
-            }
-        case .OpenCV:
-            let faceImageUI = UIImage(CGImage: self.faceImageContext.createCGImage(faceImage, fromRect: faceImage.extent))
-            let eyesArray = self.eyeDetectorCV.detectAllEyes(faceImageUI)
-            
-            // If we can't find two eyes, don't return any.
-            if eyesArray.count < 2 {
-                return (nil, nil, nil, nil)
-            }
-            
-            // We have two or more detections now. Choose the leftmost and
-            // rightmost boxes, as those tend to be the correct ones. Unless all
-            // of the detections have the same x value, they should be
-            // different boxes.
-            // TODO: Apply more heuristics to improve OpenCV detections.
-            leftEyeRect = eyesArray.objectAtIndex(0).CGRectValue
-            rightEyeRect = eyesArray.objectAtIndex(0).CGRectValue
-            for index in 1..<eyesArray.count {
-                let eyeRect = eyesArray.objectAtIndex(index).CGRectValue
-                if eyeRect.origin.x < rightEyeRect.origin.x {
-                    rightEyeRect = eyeRect
-                }
-                if eyeRect.origin.x > leftEyeRect.origin.x {
-                    leftEyeRect = eyeRect
-                }
-            }
-            // Coordinates were returned in cv::Mat coordinate space (same as
-            // UIKit). Flip the y-axis to return to CIImage space.
-            leftEyeRect = leftEyeRect.rectWithFlippedY(inFrame: faceRect)
-            rightEyeRect = rightEyeRect.rectWithFlippedY(inFrame: faceRect)
-            
-            // NOTE: OpenCV does not detect blinks as it is now.
-        }
-        
-        // Run the eye rectangles through the Kalman filter to smooth out
-        // predictions.
-        let leftEyePoint = self.enableTemporalSmoothing ? self.kalmanFilterLeft.processPoint(leftEyeRect.origin) : leftEyeRect.origin
-        let rightEyePoint = self.enableTemporalSmoothing ? self.kalmanFilterRight.processPoint(rightEyeRect.origin) : rightEyeRect.origin
-        leftEyeRect.origin = leftEyePoint
-        rightEyeRect.origin = rightEyePoint
-        
-        //setup()
-        return (leftEyeRect, rightEyeRect, leftEyeClosed, rightEyeClosed)
-    }
-
-    func setup() {
-//        TestNtwkFile.testNtwkFile()
-        
-        redLayer.frame = CGRect(x: 50, y: 50, width: 50, height: 50)
-        redLayer.backgroundColor = UIColor.redColor().CGColor
-        
-        // Round corners
-        redLayer.cornerRadius = circleRadius
-        
-        // Set border
-        redLayer.borderColor = UIColor.blackColor().CGColor
-        redLayer.borderWidth = 10
-        
-        redLayer.shadowColor = UIColor.blackColor().CGColor
-        redLayer.shadowOpacity = 0.8
-        redLayer.shadowOffset = CGSizeMake(2, 2)
-        redLayer.shadowRadius = 3
-        
-        self.videoView!.layer.addSublayer(redLayer)
-        
-        
-        // Create a blank animation using the keyPath "cornerRadius", the property we want to animate
-        let animation = CABasicAnimation(keyPath: "shadowRadius")
-        
-        // Set the starting value
-        animation.fromValue = redLayer.cornerRadius
-        
-        // Set the completion value
-        animation.toValue = 0
-        
-        // How may times should the animation repeat?
-        animation.repeatCount = 1000
-        
-        // Finally, add the animation to the layer
-        redLayer.addAnimation(animation, forKey: "cornerRadius")
-        
-        circleTimer = NSTimer.scheduledTimerWithTimeInterval(1, target: self, selector: Selector("randomizeCirclePosition"), userInfo: nil, repeats: true)
-    }
-    
-    func randomizeCirclePosition() {
-        let minX = 0
-        let maxX = 375
-        let minY = 0
-        let maxY = 667
-        
-        let preferredMinX = CGFloat(minX) + self.circleRadius * 2
-        let preferredMaxX = CGFloat(maxX) - self.circleRadius * 2
-        let preferredMinY = CGFloat(minY) + self.circleRadius * 2
-        let preferredMaxY = CGFloat(maxY) - self.circleRadius * 2
-        
-        let randomX = CGFloat(arc4random_uniform(UInt32(preferredMaxX - preferredMinX))) + preferredMinX
-        let randomY = CGFloat(arc4random_uniform(UInt32(preferredMaxY - preferredMinY))) + preferredMinY
-        
-        let point = CGPoint(x: randomX, y: randomY)
-        self.redLayer.animateToPosition(point)
-    }
-    
-    // TODO: Provide a concrete example in the documentation.
-    /// Determine where the video preview is positioned within its view. This
-    /// enables one to account for scale and clipping of the video preview, so
-    /// image coordinates can be converted into display coordinates.
-    ///
-    /// This method was adapted from Apple's SquareCam demo. If raw frame data
-    /// should be used instead (as is done in SquareCam's original code),
-    /// imageSize's width and height should be flipped.
-    ///
-    /// - parameter gravity:   The gravity setting of the preview layer. This
-    ///                   determines how the video is positioned.
-    /// - parameter viewSize:  The size of the view in which the video preview is
-    ///                   displayed.
-    /// - parameter imageSize: The size of the oriented video data (which is
-    ///                   displayed on the preview layer).
-    ///
-    /// - returns: A CGRect describing the position and size of the video
-    ///           preview.
-    static func videoPreviewBoxForGravity(gravity: String, viewSize: CGSize, imageSize: CGSize) -> CGRect {
-        let imageRatio = imageSize.width / imageSize.height
-        let viewRatio = viewSize.width / viewSize.height
-        
-        var size = CGSizeZero
-        // TODO: Test this method for all gravities. Currently, only the top one has been tested.
-        if gravity == AVLayerVideoGravityResizeAspectFill {
-            if viewRatio > imageRatio {
-                size.width = viewSize.width
-                size.height = imageSize.height * (viewSize.width / imageSize.width)
-            } else {
-                size.width = imageSize.width * (viewSize.height / imageSize.height)
-                size.height = viewSize.height
-            }
-        } else if gravity == AVLayerVideoGravityResizeAspect {
-            if viewRatio > imageRatio {
-                size.width = imageSize.width * (viewSize.height / imageSize.height)
-                size.height = viewSize.height
-            } else {
-                size.width = viewSize.width
-                size.height = imageSize.height * (viewSize.width / imageSize.width)
-            }
-        } else if gravity == AVLayerVideoGravityResize {
-            size.width = viewSize.width
-            size.height = viewSize.height
-        }
-        
-        var videoPreviewBox = CGRect()
-        videoPreviewBox.size = size
-        if size.width < viewSize.width {
-            videoPreviewBox.origin.x = (viewSize.width - size.width) / 2
-        } else {
-            videoPreviewBox.origin.x = (size.width - viewSize.width) / 2
-        }
-        
-        if size.height < viewSize.height {
-            videoPreviewBox.origin.y = (viewSize.height - size.height) / 2
-        } else {
-            videoPreviewBox.origin.y = (size.height - viewSize.height) / 2
-        }
-        
-        return videoPreviewBox
-    }
-    
 }
+
